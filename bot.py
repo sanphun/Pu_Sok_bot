@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 custom_blocked = set()
 custom_allowed = set()
 
+# Track user violations: {user_id: count}
+user_violations = {}
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
@@ -189,74 +192,79 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user = message.from_user
     chat = message.chat
+    violation_type = None
     
     # Check for documents/files
     if message.document:
         file_name = message.document.file_name or ""
-        file_id = message.document.file_id
         
         if is_suspicious_file(file_name):
+            violation_type = f"ឯកសារ: {file_name.split('.')[-1].upper()}"
             logger.warning(f"Suspicious file detected from {user.name}: {file_name}")
-            
-            # Try to delete the message
-            try:
-                await message.delete()
-                logger.info(f"Deleted suspicious file: {file_name}")
-            except Exception as e:
-                logger.error(f"Failed to delete message: {e}")
-            
-            # Try to remove the user from the group
-            try:
-                await context.bot.ban_chat_member(
-                    chat_id=chat.id,
-                    user_id=user.id
-                )
-                
-                # Send warning message
-                await context.bot.send_message(
-                    chat_id=chat.id,
-                    text=config.WARNING_MESSAGE.format(
-                        username=user.name or user.username or "Unknown",
-                        file_type=file_name.split('.')[-1].upper()
-                    )
-                )
-                
-                logger.info(f"Removed user {user.name} for sending suspicious file")
-                
-            except Exception as e:
-                logger.error(f"Failed to remove user: {e}")
     
     # Check for suspicious links
-    if message.text or message.caption:
+    if not violation_type and (message.text or message.caption):
         text = message.text or message.caption
         
         if is_suspicious_link(text):
+            violation_type = "តំណរភ្ជាប់គួរសង្ស័យ"
             logger.warning(f"Suspicious link detected from {user.name}: {text[:50]}...")
+    
+    # Process violation if found
+    if violation_type:
+        # Delete the message
+        try:
+            await message.delete()
+            logger.info(f"Deleted suspicious content: {violation_type}")
+        except Exception as e:
+            logger.error(f"Failed to delete message: {e}")
+        
+        # Track violation
+        if user.id not in user_violations:
+            user_violations[user.id] = 0
+        
+        user_violations[user.id] += 1
+        violation_count = user_violations[user.id]
+        
+        # Send warning to user (private message)
+        try:
+            warning_text = f"""⚠️ ការព្រមាន!
+
+អ្នកបានផ្ញើរ{violation_type}ដែលរារាំង
+
+ការព្រមាន {violation_count}/3
+"""
+            if violation_count < 3:
+                warning_text += f"\nយើងនឹងលុបចេញ {3 - violation_count} ការព្រមានបន្ថែមទៀត"
+            else:
+                warning_text += "\n\nនេះគឺការព្រមាន្ល៉ាចុងក្រោយ! ប្រសិនបើអ្នកបានផ្ញើរលម្អិតលម្អូលម្ដងទៀត អ្នកនឹងត្រូវលុបចេញពីក្រុម។"
             
-            # Try to delete the message
-            try:
-                await message.delete()
-                logger.info("Deleted message with suspicious link")
-            except Exception as e:
-                logger.error(f"Failed to delete message: {e}")
-            
-            # Try to remove the user from the group
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=warning_text
+            )
+            logger.info(f"Sent warning to {user.name}: violation count {violation_count}")
+        except Exception as e:
+            logger.error(f"Failed to send private warning: {e}")
+        
+        # Remove user if violation count reaches 3
+        if violation_count >= 3:
             try:
                 await context.bot.ban_chat_member(
                     chat_id=chat.id,
                     user_id=user.id
                 )
                 
-                # Send warning message
+                # Notify group
                 await context.bot.send_message(
                     chat_id=chat.id,
-                    text=config.WARNING_MESSAGE.format(
-                        username=user.name or user.username or "Unknown",
-                        file_type="LINK"
-                    )
+                    text=f"🚫 {user.name or user.username or 'Unknown'} ត្រូវលុបចេញពីក្រុមលើសពីការព្រមាន 3 ដង។"
                 )
                 
-                logger.info(f"Removed user {user.name} for sending suspicious link")
+                logger.info(f"Removed user {user.name} after 3 violations")
+                
+                # Reset violation count
+                del user_violations[user.id]
                 
             except Exception as e:
                 logger.error(f"Failed to remove user: {e}")

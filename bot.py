@@ -14,8 +14,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
-    ChatMemberHandler,
-    ErrorHandler
+    ChatMemberHandler
 )
 from telegram.constants import ChatMemberStatus
 import config
@@ -293,7 +292,7 @@ def main():
     ))
     
     # Add error handler
-    application.add_handler(error_handler_instance)
+    application.add_error_handler(error_handler)
     
     # Start the bot
     print("🤖 Telegram Security Bot is starting...")

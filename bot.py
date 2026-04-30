@@ -202,13 +202,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             violation_type = f"ឯកសារ: {file_name.split('.')[-1].upper()}"
             logger.warning(f"Suspicious file detected from {user.name}: {file_name}")
     
-    # Check for suspicious links
-    if not violation_type and (message.text or message.caption):
-        text = message.text or message.caption
-        
-        if is_suspicious_link(text):
-            violation_type = "តំណរភ្ជាប់គួរសង្ស័យ"
-            logger.warning(f"Suspicious link detected from {user.name}: {text[:50]}...")
+    # Check for suspicious captions on any media (photo, video, audio, animation, document)
+    if not violation_type:
+        caption = message.caption or message.text
+        if caption and is_suspicious_link(caption):
+            # Identify media type
+            if message.photo:
+                violation_type = "រូបភាពដែលមានតំណរគួរសង្ស័យ"
+            elif message.video:
+                violation_type = "វីដេអូដែលមានតំណរគួរសង្ស័យ"
+            elif message.audio:
+                violation_type = "ឯកសារសូត្របាទដែលមានតំណរគួរសង្ស័យ"
+            elif message.animation:
+                violation_type = "ចលនាដែលមានតំណរគួរសង្ស័យ"
+            else:
+                violation_type = "តំណរភ្ជាប់គួរសង្ស័យ"
+            
+            logger.warning(f"Suspicious link in {violation_type} from {user.name}: {caption[:50]}...")
     
     # Process violation if found
     if violation_type:
@@ -303,9 +313,9 @@ def main():
     application.add_handler(CommandHandler("allowed", allowed_command))
     application.add_handler(CommandHandler("blocked", blocked_command))
     
-    # Add message handler for documents and links
+    # Add message handler for documents, media, and text
     application.add_handler(MessageHandler(
-        filters.Document.ALL | filters.TEXT,
+        filters.Document.ALL | filters.TEXT | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.ANIMATION,
         handle_message
     ))
     

@@ -53,28 +53,64 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def allow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /allow command to add allowed file extension"""
+    user = update.message.from_user
+    chat = update.message.chat
+    
+    # Check if user is admin
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status not in ['creator', 'administrator']:
+            await update.message.reply_text("❌ អភិមន្ត្រីតែប៉ុណ្ណោះដែលអាចប្រើបានលម្អិត!")
+            return
+    except Exception:
+        await update.message.reply_text("❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
+        return
+    
     if not context.args:
         await update.message.reply_text("⚠️ ប្រើប្រាស់: /allow <extension>\nExample: /allow pdf")
         return
     
     ext = context.args[0].lower().strip().replace('.', '')
+    # Validate extension (alphanumeric only)
+    if not ext.isalnum() or len(ext) > 10:
+        await update.message.reply_text("❌ ឈ្មោះ extension មិនត្រឹមត្រូវ! ប្រើតែលេខ និងអក្សរ (ផ្ដាច់ 10 អក្សរ)")
+        return
+    
     custom_allowed.add(ext)
     custom_blocked.discard(ext)
     
-    await update.message.reply_text(f"✅ បានបន្ថែម {ext} ទៅបញ្ជីអនុញ្ញាត!")
+    await update.message.reply_text(f"✅ បានបន្ថែម .{ext} ទៅបញ្ជីអនុញ្ញាត!")
 
 
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /block command to add blocked file extension"""
+    user = update.message.from_user
+    chat = update.message.chat
+    
+    # Check if user is admin
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status not in ['creator', 'administrator']:
+            await update.message.reply_text("❌ អភិមន្ត្រីតែប៉ុណ្ណោះដែលអាចប្រើបានលម្អិត!")
+            return
+    except Exception:
+        await update.message.reply_text("❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
+        return
+    
     if not context.args:
         await update.message.reply_text("⚠️ ប្រើប្រាស់: /block <extension>\nExample: /block exe")
         return
     
     ext = context.args[0].lower().strip().replace('.', '')
+    # Validate extension (alphanumeric only)
+    if not ext.isalnum() or len(ext) > 10:
+        await update.message.reply_text("❌ ឈ្មោះ extension មិនត្រឹមត្រូវ! ប្រើតែលេខ និងអក្សរ (ផ្ដាច់ 10 អក្សរ)")
+        return
+    
     custom_blocked.add(ext)
     custom_allowed.discard(ext)
     
-    await update.message.reply_text(f"🚫 បានបន្ថែម {ext} ទៅបញ្ជីរារាំង!")
+    await update.message.reply_text(f"🚫 បានបន្ថែម .{ext} ទៅបញ្ជីរារាំង!")
 
 
 async def allowed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,14 +225,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             except Exception as e:
                 logger.error(f"Failed to remove user: {e}")
-                # Try to unban if ban failed
-                try:
-                    await context.bot.unban_chat_member(
-                        chat_id=chat.id,
-                        user_id=user.id
-                    )
-                except:
-                    pass
     
     # Check for suspicious links
     if message.text or message.caption:
@@ -232,14 +260,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             except Exception as e:
                 logger.error(f"Failed to remove user: {e}")
-                # Try to unban if ban failed
-                try:
-                    await context.bot.unban_chat_member(
-                        chat_id=chat.id,
-                        user_id=user.id
-                    )
-                except:
-                    pass
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

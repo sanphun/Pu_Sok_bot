@@ -236,26 +236,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_violations[user.id] += 1
         violation_count = user_violations[user.id]
         
-        # Send warning to user (private message)
+        # Send detailed warning to user (private message only)
         try:
             warning_text = f"""⚠️ ការព្រមាន!
 
 អ្នកបានផ្ញើរ{violation_type}ដែលរារាំង
 
-ការព្រមាន {violation_count}/3
+📊 ស្ថានភាព: ការព្រមាន {violation_count}/3
 """
             if violation_count < 3:
-                warning_text += f"\nយើងនឹងលុបចេញ {3 - violation_count} ការព្រមានបន្ថែមទៀត"
+                warning_text += f"\n⏳ ឱកាសដែលនៅសល់: {3 - violation_count} ដង\n\nប្រសិនបើលើសពីការព្រមាន 3 ដង អ្នកនឹងត្រូវលុបចេញពីក្រុម។"
             else:
-                warning_text += "\n\nនេះគឺការព្រមាន្ល៉ាចុងក្រោយ! ប្រសិនបើអ្នកបានផ្ញើរលម្អិតលម្អូលម្ដងទៀត អ្នកនឹងត្រូវលុបចេញពីក្រុម។"
+                warning_text += "\n\n⛔ ⚠️ ការព្រមាន្ល៉ាចុងក្រោយ!\n\nប្រសិនបើអ្នកបានផ្ញើរលម្អិតលម្អូលម្ដងទៀត អ្នកនឹងត្រូវលុបចេញពីក្រុមលេខ!"
             
             await context.bot.send_message(
                 chat_id=user.id,
                 text=warning_text
             )
-            logger.info(f"Sent warning to {user.name}: violation count {violation_count}")
+            logger.info(f"Sent warning to {user.name} (ID: {user.id}): violation count {violation_count}")
         except Exception as e:
-            logger.error(f"Failed to send private warning: {e}")
+            logger.error(f"Failed to send private warning to {user.name}: {e}")
         
         # Remove user if violation count reaches 3
         if violation_count >= 3:

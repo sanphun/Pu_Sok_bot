@@ -169,6 +169,47 @@ def is_suspicious_link(text: str) -> bool:
     return False
 
 
+async def send_private_warning(bot, user_id: int, username: str, violation_type: str, violation_count: int):
+    """Send a private warning message to a user
+    
+    Args:
+        bot: The Telegram bot instance
+        user_id: The user's ID to send the message to
+        username: The user's username/name for logging
+        violation_type: Description of what rule was broken
+        violation_count: Current violation count (1-3)
+    
+    Returns:
+        True if message was sent successfully, False otherwise
+    """
+    try:
+        warning_text = f"""⚠️ ការព្រមាន!
+
+អ្នកបានផ្ញើរ{violation_type}ដែលរារាំង
+
+📊 ស្ថានភាព: ការព្រមាន {violation_count}/3
+"""
+        if violation_count < 3:
+            warning_text += f"\n⏳ ឱកាសដែលនៅសល់: {3 - violation_count} ដង\n\nប្រសិនបើលើសពីការព្រមាន 3 ដង អ្នកនឹងត្រូវលុបចេញពីក្រុម។"
+        else:
+            warning_text += "\n\n⛔ ⚠️ ការព្រមាន្ល៉ាចុងក្រោយ!\n\nប្រសិនបើអ្នកបានផ្ញើរលម្អិតលម្អូលម្ដងទៀត អ្នកនឹងត្រូវលុបចេញពីក្រុមលេខ!"
+        
+        await bot.send_message(
+            chat_id=user_id,
+            text=warning_text
+        )
+        logger.info(f"✅ Sent private warning to {username} (ID: {user_id}): violation {violation_count}/3")
+        return True
+        
+    except Exception as send_error:
+        # Log detailed error information
+        error_msg = str(send_error)
+        logger.warning(f"❌ Could not send private DM to {username} (ID: {user_id})")
+        logger.warning(f"   Error: {error_msg}")
+        logger.warning(f"   → User must start bot first or may have privacy settings blocking messages")
+        return False
+
+
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle new members joining the group"""
     message = update.message
@@ -237,25 +278,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         violation_count = user_violations[user.id]
         
         # Send detailed warning to user (private message only)
-        try:
-            warning_text = f"""⚠️ ការព្រមាន!
-
-អ្នកបានផ្ញើរ{violation_type}ដែលរារាំង
-
-📊 ស្ថានភាព: ការព្រមាន {violation_count}/3
-"""
-            if violation_count < 3:
-                warning_text += f"\n⏳ ឱកាសដែលនៅសល់: {3 - violation_count} ដង\n\nប្រសិនបើលើសពីការព្រមាន 3 ដង អ្នកនឹងត្រូវលុបចេញពីក្រុម។"
-            else:
-                warning_text += "\n\n⛔ ⚠️ ការព្រមាន្ល៉ាចុងក្រោយ!\n\nប្រសិនបើអ្នកបានផ្ញើរលម្អិតលម្អូលម្ដងទៀត អ្នកនឹងត្រូវលុបចេញពីក្រុមលេខ!"
-            
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=warning_text
-            )
-            logger.info(f"Sent warning to {user.name} (ID: {user.id}): violation count {violation_count}")
-        except Exception as e:
-            logger.error(f"Failed to send private warning to {user.name}: {e}")
+        await send_private_warning(
+            bot=context.bot,
+            user_id=user.id,
+            username=user.username or user.first_name or "Unknown",
+            violation_type=violation_type,
+            violation_count=violation_count
+        )
         
         # Remove user if violation count reaches 3
         if violation_count >= 3:

@@ -20,6 +20,7 @@ import threading
 from urllib.parse import urlparse
 from datetime import datetime
 from dotenv import load_dotenv
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import config
 
 # Enable logging
@@ -52,6 +53,33 @@ user_warnings = {}
 custom_blocked = set()
 custom_allowed = set()
 
+
+# ============================================
+# HEALTH CHECK SERVER (for Render port detection)
+# ============================================
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler for health checks"""
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+    
+    def log_message(self, format, *args):
+        """Suppress HTTP server logs"""
+        pass
+
+
+def start_health_server():
+    """Start health check HTTP server on port 5000"""
+    try:
+        port = int(os.getenv('PORT', 5000))
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        logger.info(f"🌐 Health check server running on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Failed to start health server: {e}")
 
 
 # ============================================
@@ -503,6 +531,10 @@ def main():
     print("=" * 60)
     
     logger.info("✅ Bot started successfully")
+    
+    # Start health check server in background thread
+    server_thread = threading.Thread(target=start_health_server, daemon=True)
+    server_thread.start()
     
     try:
         # Start polling

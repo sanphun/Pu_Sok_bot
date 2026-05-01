@@ -39,8 +39,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # Suppress HTTP server logs
 
-def start_health_check_server(port=10000):
+def start_health_check_server():
     """Start a simple health check server for Render"""
+    # Get port from Render environment or default to 10000
+    port = int(os.getenv('PORT', 10000))
     try:
         server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -339,7 +341,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Main function to run the bot"""
-    # Start health check server for Render
+    # Start health check server for Render (uses PORT env var)
     start_health_check_server()
     
     # Get bot token from environment variable

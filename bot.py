@@ -423,19 +423,6 @@ def handle_message(message):
     
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "Unknown"
-    
-    # ============================================
-    # AUTO-DELETE ALL MESSAGES (except admin)
-    # ============================================
-    # If SPECIFIC_ADMIN_ID is set, delete all messages from non-admin users
-    if config.SPECIFIC_ADMIN_ID != 0 and user_id != config.SPECIFIC_ADMIN_ID:
-        try:
-            bot.delete_message(message.chat.id, message.message_id)
-            logger.info(f"🗑️ Auto-deleted message from {first_name} (ID: {user_id})")
-        except Exception as e:
-            logger.error(f"Failed to delete message: {e}")
-        return
-    
     violation_type = None
     
     # ============================================

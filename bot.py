@@ -18,6 +18,8 @@ from telegram.ext import (
 )
 from telegram.constants import ChatMemberStatus
 import config
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Enable logging
 logging.basicConfig(
@@ -25,6 +27,27 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Health check HTTP server for Render
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+    
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP server logs
+
+def start_health_check_server(port=10000):
+    """Start a simple health check server for Render"""
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"✅ Health check server running on port {port}")
+    except Exception as e:
+        logger.warning(f"Health check server failed: {e}")
 
 # Custom blocked extensions (can be modified by admins)
 custom_blocked = set()
@@ -316,6 +339,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Main function to run the bot"""
+    # Start health check server for Render
+    start_health_check_server()
+    
     # Get bot token from environment variable
     bot_token = os.getenv('BOT_TOKEN')
     

@@ -1,25 +1,26 @@
 """
-Telegram Security Bot
-Blocks suspicious files and links, removes violating members
+Pu_Sok - Telegram Security Guard Bot (pyTelegramBotAPI)
+A strict but funny security guard at UYFC-PV, Prey Veng
+Persona: Speaks as an older Cambodian uncle (ក្មួយ)
+
+Features:
+- Monitors group messages for dangerous files (.exe, .apk) and URLs/links
+- 3-Strike Warning System with automatic banning
+- Reports violations to specific admin with forwarded messages
+- Sends private DM warnings, or posts in group with auto-delete after 10s if DM fails
+- Welcomes new members with warnings about rules
 """
 
+import telebot
+from telebot import types
 import os
 import re
 import logging
-from datetime import datetime
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    ChatMemberHandler
-)
-from telegram.constants import ChatMemberStatus
-import config
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+from datetime import datetime
+from dotenv import load_dotenv
+import config
 
 # Enable logging
 logging.basicConfig(
@@ -28,376 +29,479 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Health check HTTP server for Render
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'OK')
-    
-    def log_message(self, format, *args):
-        pass  # Suppress HTTP server logs
+# Load environment variables
+load_dotenv()
 
-def start_health_check_server():
-    """Start a simple health check server for Render"""
-    # Get port from Render environment or default to 10000
-    port = int(os.getenv('PORT', 10000))
-    try:
-        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        logger.info(f"✅ Health check server running on port {port}")
-    except Exception as e:
-        logger.warning(f"Health check server failed: {e}")
+# Initialize bot with token
+BOT_TOKEN = config.BOT_TOKEN
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN not found! Please set BOT_TOKEN in .env file")
+    exit(1)
 
-# Custom blocked extensions (can be modified by admins)
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
+
+# ============================================
+# DATA STRUCTURES
+# ============================================
+
+# Track user violations: {user_id: warning_count}
+# This implements the 3-strike system
+user_warnings = {}
+
+# Track custom blocked/allowed extensions (for admin customization)
 custom_blocked = set()
 custom_allowed = set()
 
-# Track user violations: {user_id: count}
-user_violations = {}
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+def is_dangerous_file(file_name: str) -> bool:
+    """
+    Check if file extension is dangerous (.exe, .apk, etc.)
+    Returns: (is_dangerous, extension)
+    """
+    if not file_name:
+        return False, ""
+    
+    try:
+        ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
+        
+        # Check if explicitly allowed first
+        all_allowed = config.ALLOWED_EXTENSIONS | custom_allowed
+        if ext in all_allowed:
+            return False, ext
+        
+        # Check if blocked
+        all_blocked = config.BLOCKED_EXTENSIONS | custom_blocked
+        if ext in all_blocked:
+            return True, ext
+        
+        return False, ext
+    except:
+        return False, ""
+
+
+def contains_url(text: str) -> bool:
+    """
+    Detect if text contains any URL or link
+    Returns: True if URL detected
+    """
+    if not text:
+        return False
+    
+    # URL regex pattern
+    url_pattern = r'https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+'
+    return bool(re.search(url_pattern, text, re.IGNORECASE))
+
+
+def get_violation_type(message) -> str:
+    """
+    Determine the type of violation based on message content
+    """
+    if message.document:
+        ext = message.document.file_name.split('.')[-1].upper() if '.' in message.document.file_name else 'FILE'
+        return f"ឯកសារ .{ext}"
+    
+    if message.photo or message.video or message.audio or message.animation:
+        caption = message.caption or ""
+        if contains_url(caption):
+            return "Link/URL"
+    
+    if message.text and contains_url(message.text):
+        return "Link/URL"
+    
+    return "ឯកសារ/Link"
+
+
+def send_warning_to_user(user_id: int, first_name: str, warning_count: int, violation_type: str, chat_id: int) -> bool:
+    """
+    Try to send private DM warning to user.
+    If it fails, post warning in group and delete after 10 seconds using threading.
+    
+    THREADING EXPLANATION:
+    - The delete_after_delay() function runs in a separate thread
+    - This allows the bot to continue processing other messages
+    - After 10 seconds, it deletes the warning message to keep the group chat clean
+    - daemon=True means the thread is terminated when main program exits
+    
+    Args:
+        user_id: User's Telegram ID
+        first_name: User's first name for message
+        warning_count: Current warning count (1-3)
+        violation_type: Type of violation (e.g., "ឯកសារ .EXE")
+        chat_id: Group chat ID (for fallback)
+    
+    Returns:
+        True if DM sent successfully, False if fallback to group
+    """
+    warning_msg = config.WARNING_TEXT.format(
+        first_name=first_name,
+        violation_type=violation_type,
+        warning_count=warning_count
+    )
+    
+    try:
+        # Try to send private DM
+        bot.send_message(user_id, warning_msg)
+        logger.info(f"✅ DM warning sent to {first_name} (ID: {user_id}) - Warning {warning_count}/3")
+        return True
+    except Exception as e:
+        # DM failed - post in group and auto-delete after 10 seconds
+        logger.warning(f"❌ DM failed for {first_name} (ID: {user_id}): {str(e)}")
+        logger.info(f"📢 Posting warning in group instead (will auto-delete after 10s)")
+        
+        try:
+            group_warning = f"@{first_name}\n\n{warning_msg}"
+            msg = bot.send_message(chat_id, group_warning)
+            
+            # Use threading to delete message after 10 seconds
+            # This keeps the chat clean while still notifying the user
+            def delete_after_delay():
+                try:
+                    import time
+                    time.sleep(10)
+                    bot.delete_message(chat_id, msg.message_id)
+                    logger.info(f"🗑️ Auto-deleted group warning message after 10s")
+                except:
+                    pass
+            
+            thread = threading.Thread(target=delete_after_delay, daemon=True)
+            thread.start()
+            
+            return False
+        except Exception as group_error:
+            logger.error(f"Failed to post group warning: {group_error}")
+            return False
+
+
+def report_to_admin(user_id: int, first_name: str, warning_count: int, violation_type: str, message: types.Message):
+    """
+    Send violation report to specific admin with forwarded message as proof.
+    Uses HTML formatting for better readability.
+    """
+    if not config.SPECIFIC_ADMIN_ID or config.SPECIFIC_ADMIN_ID == 0:
+        logger.warning("⚠️ SPECIFIC_ADMIN_ID not configured!")
+        return
+    
+    try:
+        # Forward the original violating message to admin
+        bot.forward_message(config.SPECIFIC_ADMIN_ID, message.chat.id, message.message_id)
+        
+        # Send formatted report
+        report = config.ADMIN_REPORT.format(
+            first_name=first_name,
+            user_id=user_id,
+            violation_type=violation_type,
+            warning_count=warning_count
+        )
+        bot.send_message(config.SPECIFIC_ADMIN_ID, report)
+        
+        logger.info(f"📧 Admin report sent - {first_name} violation {warning_count}/3")
+    except Exception as e:
+        logger.error(f"Failed to send admin report: {e}")
+
+
+
+
+# ============================================
+# MESSAGE HANDLERS
+# ============================================
+
+@bot.message_handler(commands=['start'])
+def handle_start(message):
     """Handle /start command"""
-    await update.message.reply_text(config.BOT_DESCRIPTION)
+    bot.reply_to(message, config.BOT_DESCRIPTION)
+    logger.info(f"User {message.from_user.first_name} started bot")
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['help'])
+def handle_help(message):
     """Handle /help command"""
-    help_text = """
-📖 មូលប្បដិធានីយ៍:
+    help_text = """📖 មូលប្បដិធានីយ៍ ពូសុខ:
 
-/start - ចាប់ផ្តើម bot
-/help - បង្ហាញជំនួយនេះ
-/allow <ext> - អនុញ្ញាតប្រភេទ file
-/block <ext> - រារាំងប្រភេទ file
-/allowed - បង្ហាញ្រភេទ file ដែលអនុញ្ញាត
-/blocked - បង្ហាញប្រភេទ file ដែលរារាំង
-"""
-    await update.message.reply_text(help_text)
+/start - ចាប់ផ្តើម
+/help - ជំនួយនេះ
+/stats - ស្ថានភាពព្រមាន (ក្មួយគ្រាន់)
+/clear_warnings - ដកថ្ងាយឆ្ងាយព្រមាន (មេក្រុបគ្រាន់)
+/allow <ext> - អនុញ្ញាតឯកសារ (មេក្រុបគ្រាន់)
+/block <ext> - រារាំងឯកសារ (មេក្រុបគ្រាន់)"""
+    bot.reply_to(message, help_text)
 
 
-async def allow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /allow command to add allowed file extension"""
-    user = update.message.from_user
-    chat = update.message.chat
+
+
+@bot.message_handler(commands=['stats'])
+def handle_stats(message):
+    """Show warning statistics (group admins only)"""
+    if message.chat.type == 'private':
+        return
     
     # Check if user is admin
     try:
-        member = await context.bot.get_chat_member(chat.id, user.id)
+        member = bot.get_chat_member(message.chat.id, message.from_user.id)
         if member.status not in ['creator', 'administrator']:
-            await update.message.reply_text("❌ អភិមន្ត្រីតែប៉ុណ្ណោះដែលអាចប្រើបានលម្អិត!")
+            bot.reply_to(message, "❌ មេក្រុបតែប៉ុណ្ណោះ!")
             return
-    except Exception:
-        await update.message.reply_text("❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
+    except:
+        bot.reply_to(message, "❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
         return
     
-    if not context.args:
-        await update.message.reply_text("⚠️ ប្រើប្រាស់: /allow <extension>\nExample: /allow pdf")
+    if not user_warnings:
+        bot.reply_to(message, "📊 មិនមានក្មួយលួច ពូសុខលម្អិត!")
         return
     
-    ext = context.args[0].lower().strip().replace('.', '')
-    # Validate extension (alphanumeric only)
+    stats = "📊 ស្ថានភាពព្រមាន:\n\n"
+    for uid, count in user_warnings.items():
+        stats += f"ID {uid}: ⚠️ {count}/3\n"
+    
+    bot.reply_to(message, stats)
+
+
+@bot.message_handler(commands=['clear_warnings'])
+def handle_clear_warnings(message):
+    """Clear a user's warnings (admin only)"""
+    if message.chat.type == 'private':
+        return
+    
+    # Check if user is admin
+    try:
+        member = bot.get_chat_member(message.chat.id, message.from_user.id)
+        if member.status not in ['creator', 'administrator']:
+            bot.reply_to(message, "❌ មេក្រុបតែប៉ុណ្ណោះ!")
+            return
+    except:
+        bot.reply_to(message, "❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
+        return
+    
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        bot.reply_to(message, "⚠️ ឆ្លើយលើឯកសារក្មួយដែលត្រូវបង្ហាញលម្អិត")
+        return
+    
+    user_id = message.reply_to_message.from_user.id
+    if user_id in user_warnings:
+        del user_warnings[user_id]
+        bot.reply_to(message, f"✅ បានលុបព្រមាននៃក្មួយ {message.reply_to_message.from_user.first_name}")
+    else:
+        bot.reply_to(message, "❌ ក្មួយនេះមិនមានព្រមាន!")
+
+
+@bot.message_handler(commands=['allow'])
+def handle_allow(message):
+    """Allow a file extension (admin only)"""
+    if message.chat.type == 'private':
+        return
+    
+    try:
+        member = bot.get_chat_member(message.chat.id, message.from_user.id)
+        if member.status not in ['creator', 'administrator']:
+            bot.reply_to(message, "❌ មេក្រុបតែប៉ុណ្ណោះ!")
+            return
+    except:
+        bot.reply_to(message, "❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
+        return
+    
+    args = message.text.split()[1:]
+    if not args:
+        bot.reply_to(message, "⚠️ ប្រើប្រាស់: /allow pdf\nឧទាហរណ៍: /allow docx")
+        return
+    
+    ext = args[0].lower().replace('.', '')
     if not ext.isalnum() or len(ext) > 10:
-        await update.message.reply_text("❌ ឈ្មោះ extension មិនត្រឹមត្រូវ! ប្រើតែលេខ និងអក្សរ (ផ្ដាច់ 10 អក្សរ)")
+        bot.reply_to(message, "❌ ឈ្មោះ extension មិនត្រឹមត្រូវ!")
         return
     
     custom_allowed.add(ext)
     custom_blocked.discard(ext)
-    
-    await update.message.reply_text(f"✅ បានបន្ថែម .{ext} ទៅបញ្ជីអនុញ្ញាត!")
+    bot.reply_to(message, f"✅ បានអនុញ្ញាត .{ext}")
 
 
-async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /block command to add blocked file extension"""
-    user = update.message.from_user
-    chat = update.message.chat
+@bot.message_handler(commands=['block'])
+def handle_block(message):
+    """Block a file extension (admin only)"""
+    if message.chat.type == 'private':
+        return
     
-    # Check if user is admin
     try:
-        member = await context.bot.get_chat_member(chat.id, user.id)
+        member = bot.get_chat_member(message.chat.id, message.from_user.id)
         if member.status not in ['creator', 'administrator']:
-            await update.message.reply_text("❌ អភិមន្ត្រីតែប៉ុណ្ណោះដែលអាចប្រើបានលម្អិត!")
+            bot.reply_to(message, "❌ មេក្រុបតែប៉ុណ្ណោះ!")
             return
-    except Exception:
-        await update.message.reply_text("❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
+    except:
+        bot.reply_to(message, "❌ មិនអាចផ្ទៀងផ្ទាត់សិទ្ធិ!")
         return
     
-    if not context.args:
-        await update.message.reply_text("⚠️ ប្រើប្រាស់: /block <extension>\nExample: /block exe")
+    args = message.text.split()[1:]
+    if not args:
+        bot.reply_to(message, "⚠️ ប្រើប្រាស់: /block exe\nឧទាហរណ៍: /block bat")
         return
     
-    ext = context.args[0].lower().strip().replace('.', '')
-    # Validate extension (alphanumeric only)
+    ext = args[0].lower().replace('.', '')
     if not ext.isalnum() or len(ext) > 10:
-        await update.message.reply_text("❌ ឈ្មោះ extension មិនត្រឹមត្រូវ! ប្រើតែលេខ និងអក្សរ (ផ្ដាច់ 10 អក្សរ)")
+        bot.reply_to(message, "❌ ឈ្មោះ extension មិនត្រឹមត្រូវ!")
         return
     
     custom_blocked.add(ext)
     custom_allowed.discard(ext)
-    
-    await update.message.reply_text(f"🚫 បានបន្ថែម .{ext} ទៅបញ្ជីរារាំង!")
+    bot.reply_to(message, f"🚫 បានរារាំង .{ext}")
 
 
-async def allowed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show allowed file extensions"""
-    all_allowed = config.ALLOWED_EXTENSIONS | custom_allowed
-    await update.message.reply_text(
-        f"📂 ប្រភេទ file អនុញ្ញាត:\n" + ", ".join(sorted(all_allowed))
-    )
 
 
-async def blocked_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show blocked file extensions"""
-    all_blocked = config.BLOCKED_EXTENSIONS | custom_blocked
-    await update.message.reply_text(
-        f"🚫 ប្រភេទ file រារាំង:\n" + ", ".join(sorted(all_blocked))
-    )
 
-
-def get_all_blocked_extensions():
-    """Get all blocked extensions including custom ones"""
-    return config.BLOCKED_EXTENSIONS | custom_blocked
-
-
-def is_suspicious_file(file_name: str) -> bool:
-    """Check if file extension is suspicious"""
-    if not file_name:
-        return False
-    
-    # Get file extension
-    ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
-    
-    # Check if extension is blocked
-    all_blocked = get_all_blocked_extensions()
-    
-    # Check if explicitly allowed
-    all_allowed = config.ALLOWED_EXTENSIONS | custom_allowed
-    if ext in all_allowed:
-        return False
-    
-    return ext in all_blocked
-
-
-def is_suspicious_link(text: str) -> bool:
-    """Check if text contains suspicious links"""
-    if not text:
-        return False
-    
-    text_lower = text.lower()
-    for pattern in config.SUSPICIOUS_PATTERNS:
-        if re.search(pattern, text_lower):
-            return True
-    
-    return False
-
-
-async def send_private_warning(bot, user_id: int, username: str, violation_type: str, violation_count: int):
-    """Send a private warning message to a user
-    
-    Args:
-        bot: The Telegram bot instance
-        user_id: The user's ID to send the message to
-        username: The user's username/name for logging
-        violation_type: Description of what rule was broken
-        violation_count: Current violation count (1-3)
-    
-    Returns:
-        True if message was sent successfully, False otherwise
-    """
-    try:
-        warning_text = f"""⚠️ ការព្រមាន!
-
-អ្នកបានផ្ញើរ{violation_type}ដែលរារាំង
-
-📊 ស្ថានភាព: ការព្រមាន {violation_count}/3
-"""
-        if violation_count < 3:
-            warning_text += f"\n⏳ ឱកាសដែលនៅសល់: {3 - violation_count} ដង\n\nប្រសិនបើលើសពីការព្រមាន 3 ដង អ្នកនឹងត្រូវលុបចេញពីក្រុម។"
-        else:
-            warning_text += "\n\n⛔ ⚠️ ការព្រមាន្ល៉ាចុងក្រោយ!\n\nប្រសិនបើអ្នកបានផ្ញើរលម្អិតលម្អូលម្ដងទៀត អ្នកនឹងត្រូវលុបចេញពីក្រុមលេខ!"
-        
-        await bot.send_message(
-            chat_id=user_id,
-            text=warning_text
-        )
-        logger.info(f"✅ Sent private warning to {username} (ID: {user_id}): violation {violation_count}/3")
-        return True
-        
-    except Exception as send_error:
-        # Log detailed error information
-        error_msg = str(send_error)
-        logger.warning(f"❌ Could not send private DM to {username} (ID: {user_id})")
-        logger.warning(f"   Error: {error_msg}")
-        logger.warning(f"   → User must start bot first or may have privacy settings blocking messages")
-        return False
-
-
-async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle new members joining the group"""
-    message = update.message
-    new_members = message.new_chat_members
-    
-    for member in new_members:
-        # Skip if it's the bot itself
-        if member.id == context.bot.id:
+@bot.message_handler(content_types=['new_chat_members'])
+def handle_new_member(message):
+    """Welcome new members with rules"""
+    for member in message.new_chat_members:
+        if member.id == bot.get_me().id:
+            # Bot itself joined
+            bot.send_message(message.chat.id, "✅ ពូសុខមកលើការយាមរក្សាសន្តិសុខ!")
             continue
         
-        logger.info(f"New member joined: {member.name or member.username} (ID: {member.id})")
+        welcome_msg = config.WELCOME_TEXT.format(first_name=member.first_name or "ក្មួយ")
+        bot.send_message(message.chat.id, welcome_msg)
+        logger.info(f"👋 Welcomed {member.first_name} to group")
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages and check for suspicious content"""
-    message = update.message
+@bot.message_handler(content_types=['document', 'photo', 'video', 'audio', 'animation', 'text'])
+def handle_message(message):
+    """
+    Main message handler - checks for violations.
     
-    # Only process in groups
+    VIOLATION DETECTION:
+    1. Dangerous files (.exe, .apk)
+    2. URLs/Links in captions or text
+    
+    3-STRIKE WARNING SYSTEM EXPLANATION:
+    - Track violations in user_warnings dictionary: {user_id: count}
+    - First violation: warning count = 1/3, send DM warning
+    - Second violation: warning count = 2/3, send DM warning
+    - Third violation: warning count = 3/3, ban user and remove from dictionary
+    - Reset counter after ban so user can be monitored again if re-joins
+    
+    ACTION ON VIOLATION:
+    1. Delete the message silently
+    2. Increment user warning counter
+    3. Send private warning (or group warning with auto-delete)
+    4. Report to admin with forwarded message
+    5. Ban if warning count reaches 3
+    """
+    
+    # Only process group messages
     if message.chat.type == 'private':
         return
     
-    user = message.from_user
-    chat = message.chat
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name or "Unknown"
     violation_type = None
     
-    # Check for documents/files
+    # ============================================
+    # VIOLATION DETECTION
+    # ============================================
+    
+    # Check for dangerous files
     if message.document:
-        file_name = message.document.file_name or ""
-        
-        if is_suspicious_file(file_name):
-            violation_type = f"ឯកសារ: {file_name.split('.')[-1].upper()}"
-            logger.warning(f"Suspicious file detected from {user.name}: {file_name}")
+        is_dangerous, ext = is_dangerous_file(message.document.file_name)
+        if is_dangerous:
+            violation_type = f"ឯកសារ .{ext.upper()}"
+            logger.warning(f"🚨 Dangerous file from {first_name}: {message.document.file_name}")
     
-    # Check for suspicious captions on any media (photo, video, audio, animation, document)
+    # Check for URLs in captions or text
     if not violation_type:
-        caption = message.caption or message.text
-        if caption and is_suspicious_link(caption):
-            # Identify media type
-            if message.photo:
-                violation_type = "រូបភាពដែលមានតំណរគួរសង្ស័យ"
-            elif message.video:
-                violation_type = "វីដេអូដែលមានតំណរគួរសង្ស័យ"
-            elif message.audio:
-                violation_type = "ឯកសារសូត្របាទដែលមានតំណរគួរសង្ស័យ"
-            elif message.animation:
-                violation_type = "ចលនាដែលមានតំណរគួរសង្ស័យ"
-            else:
-                violation_type = "តំណរភ្ជាប់គួរសង្ស័យ"
-            
-            logger.warning(f"Suspicious link in {violation_type} from {user.name}: {caption[:50]}...")
+        text_to_check = message.caption or message.text or ""
+        if contains_url(text_to_check):
+            violation_type = "Link/URL"
+            logger.warning(f"🚨 Suspicious link from {first_name}: {text_to_check[:50]}...")
     
-    # Process violation if found
+    # ============================================
+    # PROCESS VIOLATION
+    # ============================================
+    
     if violation_type:
-        # Delete the message
         try:
-            await message.delete()
-            logger.info(f"Deleted suspicious content: {violation_type}")
+            # 1. DELETE THE MESSAGE SILENTLY
+            bot.delete_message(message.chat.id, message.message_id)
+            logger.info(f"🗑️ Deleted message from {first_name}")
         except Exception as e:
             logger.error(f"Failed to delete message: {e}")
         
-        # Track violation
-        if user.id not in user_violations:
-            user_violations[user.id] = 0
+        # 2. INCREMENT WARNING COUNTER (3-STRIKE SYSTEM)
+        if user_id not in user_warnings:
+            user_warnings[user_id] = 0
         
-        user_violations[user.id] += 1
-        violation_count = user_violations[user.id]
+        user_warnings[user_id] += 1
+        warning_count = user_warnings[user_id]
+        logger.info(f"⚠️ {first_name} warning {warning_count}/3")
         
-        # Send detailed warning to user (private message only)
-        await send_private_warning(
-            bot=context.bot,
-            user_id=user.id,
-            username=user.username or user.first_name or "Unknown",
-            violation_type=violation_type,
-            violation_count=violation_count
-        )
-        
-        # Remove user if violation count reaches 3
-        if violation_count >= 3:
+        # 3. SEND WARNING TO USER (private DM or group with auto-delete)
+        # Note: We use threading here to prevent blocking the main bot loop
+        def send_warning_thread():
             try:
-                await context.bot.ban_chat_member(
-                    chat_id=chat.id,
-                    user_id=user.id
-                )
-                
-                # Notify group
-                await context.bot.send_message(
-                    chat_id=chat.id,
-                    text=f"🚫 {user.name or user.username or 'Unknown'} ត្រូវលុបចេញពីក្រុមលើសពីការព្រមាន 3 ដង។"
-                )
-                
-                logger.info(f"Removed user {user.name} after 3 violations")
-                
-                # Reset violation count
-                del user_violations[user.id]
-                
+                send_warning_to_user(user_id, first_name, warning_count, violation_type, message.chat.id)
             except Exception as e:
-                logger.error(f"Failed to remove user: {e}")
+                logger.error(f"Error in warning thread: {e}")
+        
+        warning_thread = threading.Thread(target=send_warning_thread, daemon=True)
+        warning_thread.start()
+        
+        # 4. REPORT TO ADMIN WITH FORWARDED MESSAGE
+        report_to_admin(user_id, first_name, warning_count, violation_type, message)
+        
+        # 5. BAN USER IF REACHED 3 WARNINGS
+        if warning_count >= 3:
+            try:
+                bot.ban_chat_member(message.chat.id, user_id)
+                ban_msg = config.BAN_TEXT.format(first_name=first_name)
+                bot.send_message(message.chat.id, ban_msg)
+                logger.info(f"🚫 Banned {first_name} after 3 warnings")
+                
+                # Reset warnings for this user
+                del user_warnings[user_id]
+            except Exception as e:
+                logger.error(f"Failed to ban user: {e}")
 
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors"""
-    logger.error(f"Error: {context.error}")
+# ============================================
+# ERROR HANDLER & FALLBACK
+# ============================================
 
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    """Fallback handler for any other messages"""
+    pass
+
+
+# ============================================
+# MAIN
+# ============================================
 
 def main():
-    """Main function to run the bot"""
-    # Start health check server for Render (uses PORT env var)
-    start_health_check_server()
+    """Start the bot"""
+    print("=" * 60)
+    print("🤖 Pu_Sok - Telegram Security Bot Starting...")
+    print("=" * 60)
+    print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🔑 Bot Token: {'✓ Configured' if BOT_TOKEN else '✗ Missing!'}")
+    print(f"👮 Admin ID: {config.SPECIFIC_ADMIN_ID if config.SPECIFIC_ADMIN_ID != 0 else '⚠️  Not Set'}")
+    print("=" * 60)
+    print("Press Ctrl+C to stop the bot")
+    print("=" * 60)
     
-    # Get bot token from environment variable
-    bot_token = os.getenv('BOT_TOKEN')
+    logger.info("✅ Bot started successfully")
     
-    if not bot_token:
-        # Try to load from .env file
-        from dotenv import load_dotenv
-        load_dotenv()
-        bot_token = os.getenv('BOT_TOKEN')
-    
-    if not bot_token:
-        logger.error("BOT_TOKEN not found! Please set BOT_TOKEN in .env file")
-        print("Error: BOT_TOKEN not found!")
-        print("Please create a .env file with BOT_TOKEN=your_token_here")
-        return
-    
-    # Create the Application
-    application = Application.builder().token(bot_token).build()
-    
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("allow", allow_command))
-    application.add_handler(CommandHandler("block", block_command))
-    application.add_handler(CommandHandler("allowed", allowed_command))
-    application.add_handler(CommandHandler("blocked", blocked_command))
-    
-    # Add message handler for documents, media, and text
-    application.add_handler(MessageHandler(
-        filters.Document.ALL | filters.TEXT | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.ANIMATION,
-        handle_message
-    ))
-    
-    # Add new member handler
-    application.add_handler(MessageHandler(
-        filters.StatusUpdate.NEW_CHAT_MEMBERS,
-        handle_new_member
-    ))
-    
-    # Add error handler
-    application.add_error_handler(error_handler)
-    
-    # Start the bot
-    print("🤖 Telegram Security Bot is starting...")
-    print("Press Ctrl+C to stop")
-    
-    application.run_polling(allowed_updates=['message', 'edited_message'])
+    try:
+        # Start polling
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        print("\n✋ Bot stopped")
+    except Exception as e:
+        logger.error(f"❌ Critical error: {e}")
+        raise
 
 
 if __name__ == "__main__":
-    # Print startup message for Render health check
-    print("=" * 50)
-    print("🤖 Telegram Security Bot Starting...")
-    print("=" * 50)
-    print(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("🔗 Bot token: " + ("✓ Configured" if os.getenv('BOT_TOKEN') else "✗ Missing!"))
-    print("=" * 50)
     main()
+

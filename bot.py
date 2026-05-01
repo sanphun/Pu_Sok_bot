@@ -365,4 +365,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # Print startup message for Render health check
+    print("=" * 50)
+    print("🤖 Telegram Security Bot Starting...")
+    print("=" * 50)
+    print(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("🔗 Bot token: " + ("✓ Configured" if os.getenv('BOT_TOKEN') else "✗ Missing!"))
+    print("=" * 50)
     main()
